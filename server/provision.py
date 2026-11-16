@@ -245,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
                     "public_ip": server.get("public_ip"),
                     "wg": {
                         "server_public_key": server["wg"]["public_key"],
-                        "endpoint_host": server.get("public_ip"),
+                        "endpoint_host": server.get("endpoint") or server.get("public_ip"),
                         "endpoint_port": server["wg"]["port"],
                         "address4": p["ip4"] + "/32",
                         "address6": p["ip6"] + "/128",
@@ -257,7 +257,7 @@ class Handler(BaseHTTPRequestHandler):
                 if xray_enabled(server):
                     x = server["xray"]
                     resp["xray"] = {
-                        "address": server.get("public_ip"), "port": x["port"], "uuid": p["uuid"],
+                        "address": server.get("endpoint") or server.get("public_ip"), "port": x["port"], "uuid": p["uuid"],
                         "flow": x["flow"], "sni": x["sni"], "public_key": x["public_key"],
                         "short_id": x["short_id"], "fingerprint": "chrome",
                     }

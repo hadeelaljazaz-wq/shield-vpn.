@@ -26,7 +26,8 @@ jobs:
           set -o pipefail
           TOKEN_LOCAL=$(openssl rand -hex 24)
           echo "$TOKEN_LOCAL" > /tmp/token
-          sudo SHIELD_TOKEN="$TOKEN_LOCAL" SHIELD_PUBLIC_IP=10.200.0.1 SHIELD_NAME="CI runner" \
+          RIP=$(curl -4 -fsS https://1.1.1.1/cdn-cgi/trace | sed -n 's/^ip=//p')
+          sudo SHIELD_TOKEN="$TOKEN_LOCAL" SHIELD_PUBLIC_IP="$RIP" SHIELD_ENDPOINT=10.200.0.1 SHIELD_NAME="CI runner" \
                bash server/install.sh 2>&1 | tee /tmp/install.log
           sudo cat /etc/shieldvpn/server.json | jq 'del(.xray.short_id)'
           echo "RUNNER_IP=$(curl -4 -fsS https://1.1.1.1/cdn-cgi/trace | sed -n 's/^ip=//p')" >> "$GITHUB_ENV"
@@ -60,6 +61,8 @@ jobs:
           sudo ip netns exec c curl -fsS $R -H "Authorization: Bearer $(cat /tmp/token)" \
               -d "{\"wg_public_key\":\"$(cat /tmp/c.pub)\",\"device\":\"ci\"}" $API/v1/register > /tmp/reg.json
           jq 'del(.xray.uuid,.xray.short_id)' /tmp/reg.json
+          test "$(jq -r .public_ip /tmp/reg.json)" = "$RUNNER_IP"
+          test "$(jq -r .wg.endpoint_host /tmp/reg.json)" = "10.200.0.1"
 
       - name: WireGuard tunnel test
         run: |

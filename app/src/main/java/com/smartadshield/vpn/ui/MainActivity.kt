@@ -469,7 +469,7 @@ class MainActivity : AppCompatActivity() {
             title = "حجب الإعلانات داخل نفق VPN (AdGuard DNS)",
             subtitle = "عند الاتصال بخادم VPN تُرسل استعلامات DNS عبر النفق إلى AdGuard DNS العام لحجب الإعلانات. أوقفه إذا تعطل تطبيق ما (يستخدم 1.1.1.1 بدلًا منه). يُطبّق عند الاتصال التالي.",
             checked = TunnelManager.adBlockDns
-        ) { TunnelManager.setAdBlockDns(it) })
+        ) { TunnelManager.updateAdBlockDns(it) })
         serverCard.addView(actionButton("🔒 Kill Switch / Always-on: فتح إعدادات VPN في Android") {
             Toast.makeText(this, "فعّل «VPN دائم التشغيل» و«حظر الاتصالات بدون VPN» لهذا التطبيق", Toast.LENGTH_LONG).show()
             runCatching { startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) }

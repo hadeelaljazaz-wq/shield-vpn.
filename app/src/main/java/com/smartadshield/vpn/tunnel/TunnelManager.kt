@@ -75,7 +75,7 @@ object TunnelManager {
         AppRepository.get(app).serverNameProvider = { servers.active()?.name ?: "" }
     }
 
-    fun setAdBlockDns(on: Boolean) {
+    fun updateAdBlockDns(on: Boolean) {
         adBlockDns = on
         app.getSharedPreferences("shield_tunnel", Context.MODE_PRIVATE).edit().putBoolean("adblock_dns", on).apply()
     }

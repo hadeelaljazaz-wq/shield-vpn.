@@ -62,7 +62,9 @@ if [ -z "${SHIELD_PUBLIC_IP:-}" ]; then
   SHIELD_PUBLIC_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org || true)"
   [ -n "$SHIELD_PUBLIC_IP" ] || SHIELD_PUBLIC_IP="$(ip -4 addr show "$WAN_IF" | awk '/inet /{sub(/\/.*/,"",$2);print $2;exit}')"
 fi
-log "public endpoint: $SHIELD_PUBLIC_IP"
+# Address clients dial (may differ from the exit IP, e.g. behind NAT or in CI).
+SHIELD_ENDPOINT="${SHIELD_ENDPOINT:-$SHIELD_PUBLIC_IP}"
+log "public IP: $SHIELD_PUBLIC_IP, client endpoint: $SHIELD_ENDPOINT"
 
 # ---------- secrets ----------
 umask 077
@@ -172,9 +174,9 @@ UNIT
       '{port:$port, public_key:.public_key, short_id:.short_id, sni:$sni, flow:"xtls-rprx-vision"}' "$ETC/reality.json")"
 fi
 
-jq -n --arg name "$NAME" --arg cc "$CC" --arg ip "$SHIELD_PUBLIC_IP" --arg wgpub "$WG_PUB" \
+jq -n --arg name "$NAME" --arg cc "$CC" --arg ip "$SHIELD_PUBLIC_IP" --arg ep "$SHIELD_ENDPOINT" --arg wgpub "$WG_PUB" \
       --argjson wgport "$WG_PORT" --argjson xray "$XRAY_JSON" \
-      '{name:$name, cc:$cc, public_ip:$ip, wg:{public_key:$wgpub, port:$wgport, mtu:1280}, xray:$xray}' > "$ETC/server.json"
+      '{name:$name, cc:$cc, public_ip:$ip, endpoint:$ep, wg:{public_key:$wgpub, port:$wgport, mtu:1280}, xray:$xray}' > "$ETC/server.json"
 chmod 600 "$ETC/server.json"
 
 # ---------- provisioning API ----------
