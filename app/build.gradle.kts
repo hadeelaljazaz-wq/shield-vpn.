@@ -81,8 +81,8 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1")
 
-    // Official WireGuard userspace backend (wireguard-go) — https://github.com/WireGuard/wireguard-android
-    implementation("com.wireguard.android:tunnel:1.0.20260315")
+    // Official WireGuard userspace backend (wireguard-go), latest release published on Maven Central — https://github.com/WireGuard/wireguard-android
+    implementation("com.wireguard.android:tunnel:1.0.20230706")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     // Xray-core built from source by CI (xray/libxray/build.sh) — https://github.com/XTLS/Xray-core
