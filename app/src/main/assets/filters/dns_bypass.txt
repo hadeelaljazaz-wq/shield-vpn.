@@ -1,0 +1,35 @@
+# Smart Ad Shield — DNS-over-HTTPS bootstrap hosts that let apps bypass the local filter.
+# "use-application-dns.net" is Mozilla's canary domain: answering NXDOMAIN tells Firefox
+# not to enable DoH automatically. Toggle: "منع تجاوز DNS".
+
+use-application-dns.net
+dns.google
+dns.google.com
+cloudflare-dns.com
+mozilla.cloudflare-dns.com
+chrome.cloudflare-dns.com
+one.one.one.one
+1dot1dot1dot1.cloudflare-dns.com
+family.cloudflare-dns.com
+security.cloudflare-dns.com
+doh.opendns.com
+doh.familyshield.opendns.com
+dns.quad9.net
+dns9.quad9.net
+dns10.quad9.net
+dns11.quad9.net
+dns.adguard.com
+dns.adguard-dns.com
+dns-family.adguard-dns.com
+doh.cleanbrowsing.org
+dns.nextdns.io
+doh.xfinity.com
+dns.alidns.com
+doh.pub
+dot.pub
+doh.dns.apple.com
+mask.icloud.com
+mask-h2.icloud.com
+dns.controld.com
+freedns.controld.com
+doh.mullvad.net
