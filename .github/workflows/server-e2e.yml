@@ -124,7 +124,7 @@ jobs:
           unzip -q /tmp/tf.zip -d /tmp/tf
           mkdir -p /tmp/stack && cp server/oracle/* server/install.sh server/provision.py /tmp/stack/
           cd /tmp/stack && /tmp/tf/terraform init -backend=false -input=false >/dev/null && /tmp/tf/terraform validate
-          cd /tmp/stack && zip -q -r "$GITHUB_WORKSPACE/oracle-stack.zip" .
+          cd /tmp/stack && rm -rf .terraform && zip -q -r "$GITHUB_WORKSPACE/oracle-stack.zip" . && unzip -l "$GITHUB_WORKSPACE/oracle-stack.zip"
 
       - name: Diagnostics on failure
         if: failure()
@@ -139,6 +139,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: oracle-stack
+          overwrite_files: true
           name: "Oracle Cloud gateway stack (E2E-tested)"
           make_latest: false
           body: |
