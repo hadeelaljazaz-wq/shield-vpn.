@@ -111,15 +111,50 @@ if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent sa
 # ---------- Xray ----------
 XRAY_JSON="null"
 if [ "${SHIELD_SKIP_XRAY:-0}" != 1 ]; then
-  if ! command -v xray >/dev/null 2>&1; then
-    log "installing Xray-core (official installer)"
-    curl -fsSL -o /tmp/xray-install.sh https://github.com/XTLS/Xray-install/raw/main/install-release.sh
-    if [ -n "${SHIELD_XRAY_VERSION:-}" ]; then
-      bash /tmp/xray-install.sh install --version "$SHIELD_XRAY_VERSION"
-    else
-      bash /tmp/xray-install.sh install
-    fi
+  XRAY_VERSION="${SHIELD_XRAY_VERSION:-v26.11.9}"
+  if [ "$(/usr/local/bin/xray version 2>/dev/null | awk 'NR==1{print "v"$2}')" != "$XRAY_VERSION" ]; then
+    log "installing Xray-core $XRAY_VERSION from the official GitHub release"
+    case "$(uname -m)" in
+      x86_64) XZ=Xray-linux-64.zip ;;
+      aarch64|arm64) XZ=Xray-linux-arm64-v8a.zip ;;
+      *) die "unsupported CPU $(uname -m)" ;;
+    esac
+    BASE="https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION"
+    TMPX="$(mktemp -d)"
+    curl -fsSL --retry 4 -o "$TMPX/x.zip" "$BASE/$XZ"
+    curl -fsSL --retry 4 -o "$TMPX/x.dgst" "$BASE/$XZ.dgst"
+    WANT="$(grep -i 'SHA2-256' "$TMPX/x.dgst" | awk -F'= ' '{print $2}' | tr -d '[:space:]')"
+    GOT="$(sha256sum "$TMPX/x.zip" | cut -d' ' -f1)"
+    [ -n "$WANT" ] && [ "$WANT" = "$GOT" ] || die "Xray download checksum mismatch ($GOT != $WANT)"
+    unzip -q -o "$TMPX/x.zip" -d "$TMPX/x"
+    install -m 755 "$TMPX/x/xray" /usr/local/bin/xray
+    mkdir -p /usr/local/share/xray /usr/local/etc/xray
+    install -m 644 "$TMPX/x/geoip.dat" "$TMPX/x/geosite.dat" /usr/local/share/xray/
+    rm -rf "$TMPX"
   fi
+  [ -s /usr/local/etc/xray/config.json ] || echo '{}' > /usr/local/etc/xray/config.json
+  cat > /etc/systemd/system/xray.service <<UNIT
+[Unit]
+Description=Xray Service
+After=network-online.target
+
+[Service]
+User=nobody
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  chmod 644 /usr/local/etc/xray/config.json
+  systemctl daemon-reload
+  systemctl enable xray >/dev/null 2>&1 || true
   XRAY_BIN="$(command -v xray || echo /usr/local/bin/xray)"
   if [ ! -s "$ETC/reality.json" ]; then
     # `xray x25519` prints the private key on line 1 and the public key

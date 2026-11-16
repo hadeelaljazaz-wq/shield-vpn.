@@ -124,6 +124,7 @@ def write_xray_config(server, state):
         os.makedirs(os.path.dirname(XRAY_CONFIG), exist_ok=True)
         with open(XRAY_CONFIG, "w", encoding="utf-8") as f:
             f.write(new)
+        os.chmod(XRAY_CONFIG, 0o644)  # xray runs as nobody
         subprocess.run(["systemctl", "restart", "xray"], check=False)
 
 

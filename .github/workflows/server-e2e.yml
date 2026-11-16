@@ -23,6 +23,7 @@ jobs:
 
       - name: Install gateway
         run: |
+          set -o pipefail
           TOKEN_LOCAL=$(openssl rand -hex 24)
           echo "$TOKEN_LOCAL" > /tmp/token
           sudo SHIELD_TOKEN="$TOKEN_LOCAL" SHIELD_PUBLIC_IP=10.200.0.1 SHIELD_NAME="CI runner" \

@@ -4,7 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 XRAY_VERSION="${XRAY_VERSION:-v26.11.9}"
 # Xray tags (vYY.M.D) are not semver-major-compatible; `go get @tag` maps them to a pseudo-version.
-go get github.com/xtls/xray-core@"$XRAY_VERSION"
+# so resolve the tag to its commit and let Go build a pseudo-version.
+REF="$(git ls-remote https://github.com/XTLS/Xray-core "refs/tags/${XRAY_VERSION}^{}" | cut -f1)"
+[ -n "$REF" ] || REF="$(git ls-remote https://github.com/XTLS/Xray-core "refs/tags/${XRAY_VERSION}" | cut -f1)"
+echo "Xray-core $XRAY_VERSION -> $REF"
+go get github.com/xtls/xray-core@"$REF"
 go get golang.org/x/mobile/bind@latest golang.org/x/mobile/cmd/gomobile@latest
 go mod tidy
 go install golang.org/x/mobile/cmd/gomobile@latest
