@@ -132,6 +132,8 @@ if [ "${SHIELD_SKIP_XRAY:-0}" != 1 ]; then
     install -m 644 "$TMPX/x/geoip.dat" "$TMPX/x/geosite.dat" /usr/local/share/xray/
     rm -rf "$TMPX"
   fi
+  mkdir -p /usr/local/etc/xray /usr/local/share/xray
+  chmod 755 /usr/local/etc/xray /usr/local/share/xray   # umask 077 above; xray runs as nobody
   [ -s /usr/local/etc/xray/config.json ] || echo '{}' > /usr/local/etc/xray/config.json
   cat > /etc/systemd/system/xray.service <<UNIT
 [Unit]

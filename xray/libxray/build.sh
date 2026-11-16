@@ -16,5 +16,5 @@ go install golang.org/x/mobile/cmd/gobind@latest
 "$(go env GOPATH)/bin/gomobile" init
 mkdir -p ../../app/libs
 "$(go env GOPATH)/bin/gomobile" bind -v -target=android/arm64,android/arm,android/amd64 -androidapi 24 \
-  -trimpath -ldflags='-s -w -buildid=' -o ../../app/libs/libxray.aar .
+  -trimpath -ldflags='-s -w -buildid= -checklinkname=0' -o ../../app/libs/libxray.aar .
 ls -la ../../app/libs/libxray.aar
