@@ -12,7 +12,8 @@
         tools:ignore="QueryAllPackagesPermission" />
 
     <application
-        android:allowBackup="true"
+        android:name=".ShieldApp"
+        android:allowBackup="false"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@drawable/ic_launcher"
@@ -40,7 +41,26 @@
             </intent-filter>
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Secure multi-protocol encrypted VPN tunnel and DNS shield protecting user network communications" />
+                android:value="On-device DNS ad filtering (local VpnService, no remote server)" />
+        </service>
+
+        <!-- Real VPN: Xray TUN (WireGuard's GoBackend$VpnService comes from the official library manifest). -->
+        <service
+            android:name=".service.XrayVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".service.ConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user-started VPN tunnel connected and shows its status" />
         </service>
 
     </application>

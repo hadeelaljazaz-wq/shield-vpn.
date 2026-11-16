@@ -10,25 +10,25 @@ enum class VpnProtocol(
         "auto",
         "تلقائي (الذكي)",
         "Auto (Smart)",
-        "يقيس أداء واستجابة الشبكة ويختار أفضل بروتوكول تلقائيًا"
+        "يجرّب WireGuard أولًا ثم Xray REALITY إذا فشل التحقق"
     ),
     WIREGUARD(
         "wireguard",
         "WireGuard (الأسرع والأخف)",
         "WireGuard (High-Speed)",
-        "تشفير حديث فائق السرعة، استهلاك بطارية شبه منعدم وتأخير منخفض"
+        "المكتبة الرسمية wireguard-go — يحتاج UDP غير محجوب"
     ),
     XRAY_VLESS(
         "xray",
         "Xray / REALITY (مقاوم الحجب)",
         "Xray / REALITY (Anti-Censorship)",
-        "محاكاة HTTPS TLS لتجاوز الرقابة الشديدة وحظر الـ VPN والـ UDP"
+        "Xray-core عبر TCP/443 يشبه اتصال HTTPS — لا يضمن تجاوز كل أشكال الحجب"
     ),
     LOCAL_DNS_SHIELD(
         "dns_shield",
-        "درع DNS الذكي (حجب إعلانات محلي)",
+        "درع DNS المحلي (ليس VPN)",
         "Smart DNS Shield",
-        "حجب إعلانات محلي عبر DNS مع الحفاظ الكامل على اتصالك الأصلي دون خادم خارجي"
+        "فلترة DNS على الجهاز فقط — ليس VPN ولا يغيّر IP"
     );
 
     companion object {

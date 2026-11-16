@@ -39,8 +39,10 @@ import com.smartadshield.vpn.core.engine.VpnProtocol
 import com.smartadshield.vpn.core.engine.VpnState
 import com.smartadshield.vpn.core.filter.AppMode
 import com.smartadshield.vpn.core.video.VideoIncident
-import com.smartadshield.vpn.core.wireguard.WireGuardConfigManager
-import com.smartadshield.vpn.core.wireguard.WireGuardProfile
+import com.smartadshield.vpn.tunnel.EnrollmentCode
+import com.smartadshield.vpn.tunnel.ServerEntry
+import com.smartadshield.vpn.tunnel.TunnelManager
+import com.smartadshield.vpn.tunnel.TunnelStatus
 import com.smartadshield.vpn.data.AppRepository
 import com.smartadshield.vpn.data.FilterSubscription
 import com.smartadshield.vpn.data.InstalledAppItem
@@ -114,13 +116,19 @@ class MainActivity : AppCompatActivity() {
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { _ ->
-        // Check again whether VPN permission is now granted
+        val action = pendingAfterPermission
+        pendingAfterPermission = null
         if (VpnService.prepare(this) == null) {
-            startVpnServiceInternal()
+            action?.invoke()
         } else {
-            Toast.makeText(this, "لم يتم منح إذن إنشاء VPN المحلي", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "لم يتم منح إذن VPN", Toast.LENGTH_SHORT).show()
         }
     }
+    private var pendingAfterPermission: (() -> Unit)? = null
+    private var serverTitleTv: TextView? = null
+    private var serverDetailTv: TextView? = null
+    private var serverFlagTv: TextView? = null
+    private var tunnelLogTv: TextView? = null
 
     private val notifPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -201,6 +209,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun observeRepository() {
         uiScope.launch {
+            TunnelManager.status.collectLatest { ts ->
+                updateDashboardStats(repo.stats.value)
+                tunnelLogTv?.text = ts.log.reversed().joinToString("\n").ifEmpty { "لا توجد أحداث بعد." }
+            }
+        }
+        uiScope.launch {
             repo.stats.collectLatest { st ->
                 updateDashboardStats(st)
             }
@@ -228,15 +242,11 @@ class MainActivity : AppCompatActivity() {
             if (isFinishing || isDestroyed) return@launch
             if (ip != null && baselinePublicIp == null) baselinePublicIp = ip
             if (ip != null) repo.updateVerifiedPublicIp(ip)
-            val st = repo.stats.value
-            publicIpTv?.text = if (ip != null) {
-                if (st.vpnState == VpnState.CONNECTED && baselinePublicIp != null && baselinePublicIp != ip) {
-                    "✓ عنوان IP المحمي عبر النفق: $ip (خادم الـ Gateway)"
-                } else {
-                    "عنوان IP العام الحالي: $ip"
-                }
-            } else {
-                "عنوان IP العام: جاري التحقق عبر الإنترنت..."
+            val ts = TunnelManager.status.value
+            publicIpTv?.text = when {
+                ts.state == VpnState.CONNECTED -> "✓ IP الخروج المتحقق منه عبر النفق: ${ts.verifiedPublicIp} (${ts.verifiedCountry ?: "?"})"
+                ip != null -> "عنوان IP العام الحالي (بدون VPN): $ip"
+                else -> "عنوان IP العام: تعذر القياس"
             }
         }
     }
@@ -418,15 +428,14 @@ class MainActivity : AppCompatActivity() {
                 topMargin = dp(12)
             }
         }
-        val srv = repo.activeWireGuardProfile()
-        serverCard.addView(sectionTitle("موقع خادم الـ VPN (VPN Gateway)"))
+        serverCard.addView(sectionTitle("خادم الـ VPN"))
         val serverRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(4), 0, dp(4))
         }
         val flagTv = TextView(this).apply {
-            text = srv.flagEmoji
+            text = "🖥️"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
             setPadding(dp(4), 0, dp(10), 0)
         }
@@ -435,13 +444,13 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         val serverTitleTv = TextView(this).apply {
-            text = srv.name
+            text = ""
             setTextColor(COLOR_TEXT_PRIMARY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setTypeface(typeface, Typeface.BOLD)
         }
         val serverDetailTv = TextView(this).apply {
-            text = "المنفذ: ${srv.endpointPort} • Ping: ${srv.pingMs} ms • التشفير: ChaCha20-Poly1305"
+            text = ""
             setTextColor(COLOR_TEXT_SECONDARY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
         }
@@ -450,8 +459,20 @@ class MainActivity : AppCompatActivity() {
         serverRow.addView(flagTv)
         serverRow.addView(serverInfoCol)
         serverCard.addView(serverRow)
-        serverCard.addView(actionButton("🌍 تغيير الخادم أو استيراد تكوين .conf مخصص...") {
+        this.serverFlagTv = flagTv
+        this.serverTitleTv = serverTitleTv
+        this.serverDetailTv = serverDetailTv
+        serverCard.addView(actionButton("🌍 الخوادم: إضافة رمز تسجيل / اختيار / استيراد .conf") {
             showServerSelectionDialog()
+        })
+        serverCard.addView(switchRow(
+            title = "حجب الإعلانات داخل نفق VPN (AdGuard DNS)",
+            subtitle = "عند الاتصال بخادم VPN تُرسل استعلامات DNS عبر النفق إلى AdGuard DNS العام لحجب الإعلانات. أوقفه إذا تعطل تطبيق ما (يستخدم 1.1.1.1 بدلًا منه). يُطبّق عند الاتصال التالي.",
+            checked = TunnelManager.adBlockDns
+        ) { TunnelManager.setAdBlockDns(it) })
+        serverCard.addView(actionButton("🔒 Kill Switch / Always-on: فتح إعدادات VPN في Android") {
+            Toast.makeText(this, "فعّل «VPN دائم التشغيل» و«حظر الاتصالات بدون VPN» لهذا التطبيق", Toast.LENGTH_LONG).show()
+            runCatching { startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) }
         })
         col.addView(serverCard)
 
@@ -618,14 +639,6 @@ class MainActivity : AppCompatActivity() {
 
         modesCard.addView(
             switchRow(
-                title = "تجاوز حجب DPI وتجزئة TLS (تجريبي)",
-                subtitle = "يمرّر الاتصال مع تجزئة حزمة TLS ClientHello لتجاوز فحص SNI للمواقع المحجوبة عبر DPI. تنبيه: لا يتجاوز الحجب على مستوى عناوين IP مثل TikTok في الأردن",
-                checked = repo.dpiBypassEnabled
-            ) { repo.dpiBypassEnabled = it }
-        )
-
-        modesCard.addView(
-            switchRow(
                 title = "استخدام خوادم DNS عالمية نقية (Cloudflare / Google)",
                 subtitle = "يتجاوز خوادم مزود الخدمة المحلية لمنع تسميم أو حجب نطاقات TikTok والمواقع المحجوبة",
                 checked = repo.usePublicUpstreamDns
@@ -764,29 +777,24 @@ class MainActivity : AppCompatActivity() {
         })
 
         card.addView(TextView(this).apply {
-            text = "توضيح تقني هام وصادق:\nفي الأردن، حظر تطبيق TikTok مفروض على مستوى مسارات عناوين IP لشبكات الاتصالات (Zain, Orange, Umniah) بالإضافة إلى حظر DNS. تطبيق Smart Ad Shield هو عبارة عن فلتر محلي (Local DNS VPN) يعمل على جهازك لحجب الإعلانات بدون خادم خارجي، ولذلك تقنيًا لا يمكن لأي فلتر محلي فك حجب TikTok في الأردن دون خادم VPN خارجي يقع خارج الأردن (لتغيير عنوان IP).\n\nالحل لتشغيل TikTok مع هذا التطبيق:"
+            text = "يتطلب TikTok على شبكة محجوبة اتصالًا حقيقيًا بخادم VPN (WireGuard أو Xray) — درع DNS المحلي وحده لا يكفي لأنه لا يغيّر عنوان IP.\n" +
+                "• يجب أن يمر TikTok داخل النفق (غير مستثنى).\n" +
+                "• لا يوجد بروتوكول يضمن تجاوز كل أشكال الحجب؛ إذا فشل WireGuard (UDP) جرّب Xray REALITY.\n" +
+                "• تغيير IP قد يؤثر على المحتوى المقترح لأن الخدمة تستخدم الموقع ومعلومات الشبكة.\n" +
+                "• حالة الاختبار: لم يُختبر بعد على هاتف وشبكة محجوبة."
             setTextColor(COLOR_TEXT_SECONDARY)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, 0, 0, dp(8))
         })
 
-        val areAllExcluded = tiktokPkgs.any { repo.getAppMode(it) == AppMode.EXCLUDED }
-        card.addView(TextView(this).apply {
-            text = "⚡ استثناء تطبيق TikTok من نفق الفلترة (Split-Tunneling)\nاستثناء TikTok يمنع أي تعارض، ويمكّنك من استخدام بروكسي خارجي لتشغيله دون التأثير على حجب الإعلانات في باقي تطبيقات الجهاز."
-            setTextColor(COLOR_TEXT_PRIMARY)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(dp(8), dp(6), dp(8), dp(6))
-            background = roundedDrawable(COLOR_BG_SURFACE, COLOR_BORDER, dp(8), dp(1))
-        })
-
-        card.addView(actionButton(if (areAllExcluded) "✓ تطبيق TikTok مستثنى حالياً من الفلترة (اضغط للإلغاء)" else "⚡ استثناء تطبيق TikTok من نفق الفلترة فوراً") {
-            val nextMode = if (areAllExcluded) AppMode.FILTER else AppMode.EXCLUDED
-            for (pkg in tiktokPkgs) {
-                repo.setAppMode(pkg, nextMode)
-            }
-            Toast.makeText(this, if (nextMode == AppMode.EXCLUDED) "تم استثناء تطبيق TikTok بنجاح" else "تمت إعادة TikTok لوضع الفلترة", Toast.LENGTH_SHORT).show()
-            recreate()
-        })
+        val excluded = tiktokPkgs.filter { repo.getAppMode(it) == AppMode.EXCLUDED }
+        if (excluded.isNotEmpty()) {
+            card.addView(actionButton("⚠ TikTok مستثنى من النفق — اضغط لإعادته داخل VPN") {
+                for (pkg in tiktokPkgs) repo.setAppMode(pkg, AppMode.FILTER)
+                Toast.makeText(this, "TikTok سيمر عبر النفق عند الاتصال التالي", Toast.LENGTH_SHORT).show()
+                recreate()
+            })
+        }
 
         if (isTikTokInstalled && installedPkg != null) {
             // Launch TikTok
@@ -864,18 +872,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateDashboardStats(st: VpnStats) {
+        val dnsMode = repo.activeProtocol.value == VpnProtocol.LOCAL_DNS_SHIELD
+        val ts: TunnelStatus = TunnelManager.status.value
+        val state: VpnState = if (dnsMode) st.vpnState else ts.state
         val ring = powerCircle
+        val busy = state.isBusy
         if (ring != null) {
-            val strokeColor = when (st.vpnState) {
-                VpnState.CONNECTED -> COLOR_STATUS_GREEN
-                VpnState.CONNECTING, VpnState.AUTHENTICATING, VpnState.ESTABLISHING_TUNNEL, VpnState.VERIFYING_CONNECTIVITY, VpnState.RECONNECTING -> COLOR_STATUS_AMBER
-                VpnState.ERROR -> COLOR_STATUS_RED
+            val strokeColor = when {
+                state == VpnState.CONNECTED -> COLOR_STATUS_GREEN
+                state == VpnState.LOCAL_DNS_ONLY -> COLOR_ACCENT_BLUE
+                busy -> COLOR_STATUS_AMBER
+                state == VpnState.ERROR -> COLOR_STATUS_RED
                 else -> COLOR_ACCENT_BLUE
             }
-            val fillColor = when (st.vpnState) {
-                VpnState.CONNECTED -> COLOR_STATUS_GREEN_SOFT
-                VpnState.CONNECTING, VpnState.AUTHENTICATING, VpnState.ESTABLISHING_TUNNEL, VpnState.VERIFYING_CONNECTIVITY, VpnState.RECONNECTING -> COLOR_STATUS_AMBER_SOFT
-                VpnState.ERROR -> COLOR_STATUS_RED_SOFT
+            val fillColor = when {
+                state == VpnState.CONNECTED -> COLOR_STATUS_GREEN_SOFT
+                busy -> COLOR_STATUS_AMBER_SOFT
+                state == VpnState.ERROR -> COLOR_STATUS_RED_SOFT
                 else -> COLOR_ACCENT_SOFT
             }
             ring.background = GradientDrawable().apply {
@@ -883,36 +896,62 @@ class MainActivity : AppCompatActivity() {
                 setColor(fillColor)
                 setStroke(dp(4), strokeColor)
             }
-            val buttonText = when (st.vpnState) {
-                VpnState.CONNECTED -> "متصل • قطع"
-                VpnState.CONNECTING, VpnState.AUTHENTICATING, VpnState.ESTABLISHING_TUNNEL, VpnState.VERIFYING_CONNECTIVITY -> "جاري الاتصال..."
-                VpnState.ERROR -> "إعادة المحاولة"
-                else -> "اتصال بالـ VPN"
+            (ring.getChildAt(1) as? TextView)?.text = when {
+                state == VpnState.CONNECTED || state == VpnState.LOCAL_DNS_ONLY -> "إيقاف"
+                busy -> "إلغاء"
+                state == VpnState.ERROR -> "إعادة المحاولة"
+                dnsMode -> "تشغيل الحجب"
+                else -> "اتصال"
             }
-            (ring.getChildAt(1) as? TextView)?.text = buttonText
         }
 
-        powerStateTitle?.text = when (st.vpnState) {
-            VpnState.CONNECTED -> "متصل بنفق VPN حقيقي (مشفر)"
-            VpnState.CONNECTING, VpnState.AUTHENTICATING, VpnState.ESTABLISHING_TUNNEL, VpnState.VERIFYING_CONNECTIVITY -> st.vpnState.labelAr
-            VpnState.ERROR -> "خطأ: ${st.vpnError.messageAr}"
-            VpnState.DISCONNECTED -> "غير متصل بالـ VPN"
-            else -> st.vpnState.labelAr
+        powerStateTitle?.text = when {
+            state == VpnState.ERROR && !dnsMode -> "فشل الاتصال"
+            else -> state.labelAr
         }
         powerStateTitle?.setTextColor(
-            when (st.vpnState) {
-                VpnState.CONNECTED -> COLOR_STATUS_GREEN
-                VpnState.CONNECTING, VpnState.AUTHENTICATING, VpnState.ESTABLISHING_TUNNEL, VpnState.VERIFYING_CONNECTIVITY -> COLOR_STATUS_AMBER
-                VpnState.ERROR -> COLOR_STATUS_RED
+            when {
+                state == VpnState.CONNECTED -> COLOR_STATUS_GREEN
+                busy -> COLOR_STATUS_AMBER
+                state == VpnState.ERROR -> COLOR_STATUS_RED
                 else -> COLOR_TEXT_PRIMARY
             }
         )
 
-        powerStateSubtitle?.text = when (st.vpnState) {
-            VpnState.CONNECTED -> "السيرفر: ${st.wireGuardServerName} • بروتوكول: ${st.activeProtocol.displayNameAr} • نفق مشفر"
-            VpnState.CONNECTING, VpnState.AUTHENTICATING, VpnState.ESTABLISHING_TUNNEL, VpnState.VERIFYING_CONNECTIVITY -> "جاري تأمين النفق مع خادم ${st.wireGuardServerName}..."
-            VpnState.ERROR -> "فشل الاتصال: ${st.vpnError.messageAr}"
-            else -> "السيرفر: ${st.wireGuardServerName} • اضغط على الزر للاتصال المشفر"
+        powerStateSubtitle?.text = if (dnsMode) {
+            when (state) {
+                VpnState.LOCAL_DNS_ONLY -> "فلترة DNS على الجهاز فقط — لا يوجد خادم، لا تشفير لحركة المرور، وعنوان IP لم يتغير"
+                else -> "وضع درع DNS المحلي (ليس VPN)"
+            }
+        } else {
+            val since = if (ts.connectedSinceMs > 0) (System.currentTimeMillis() - ts.connectedSinceMs) / 1000 else 0
+            when (state) {
+                VpnState.CONNECTED -> buildString {
+                    append("${ts.engine?.labelAr} • ${ts.serverName}\n")
+                    append("IP المتحقق منه: ${ts.verifiedPublicIp} • الدولة: ${ts.verifiedCountry ?: "?"}\n")
+                    append("RTT: ${ts.pingMs?.let { "$it ms" } ?: "—"} • الإنترنت: ${if (ts.internetOk == true) "يعمل" else "؟"}\n")
+                    append("مدة الاتصال: ${since / 60}د ${since % 60}ث • ↓ ${fmtBytes(ts.rxBytes)} ↑ ${fmtBytes(ts.txBytes)}")
+                    if (ts.lastHandshakeMs > 0) append("\nآخر مصافحة: منذ ${(System.currentTimeMillis() - ts.lastHandshakeMs) / 1000} ث")
+                }
+                VpnState.ERROR -> ts.errorAr ?: "خطأ غير معروف"
+                VpnState.DISCONNECTED -> TunnelManager.servers.active()?.let { "الخادم: ${it.name}" } ?: "لا يوجد خادم — اضغط «اتصال» لإضافة رمز التسجيل"
+                else -> "${ts.engine?.labelAr ?: ""} ${ts.serverName ?: ""}"
+            }
+        }
+
+        val active = TunnelManager.servers.active()
+        serverTitleTv?.text = active?.name ?: "لا يوجد خادم مضاف"
+        serverDetailTv?.text = when {
+            active == null -> "لا توجد خوادم وهمية في هذا الإصدار. أضف خادمك الحقيقي برمز التسجيل."
+            else -> {
+                val ip = active.provisioned?.publicIp ?: active.enrollment?.serverIp ?: "ملف يدوي"
+                val proto = if (active.supportsXray) "WireGuard + Xray REALITY" else "WireGuard"
+                val cc = active.lastVerifiedCountry?.let { "دولة الخروج المقاسة: $it" } ?: "الدولة: لم يُتحقق بعد"
+                "$ip • $proto • $cc"
+            }
+        }
+        if (ts.state == VpnState.CONNECTED) {
+            publicIpTv?.text = "✓ IP الخروج المتحقق منه عبر النفق: ${ts.verifiedPublicIp} (${ts.verifiedCountry ?: "?"})"
         }
 
         statBlockedTv?.text = st.blockedQueries.toString()
@@ -922,13 +961,20 @@ class MainActivity : AppCompatActivity() {
         statCacheTv?.text = "${st.cachedQueries} (${st.cacheSize})"
         statRulesTv?.text = st.totalActiveRules.toString()
 
-        dnsStatusTitleTv?.text = if (st.running) {
-            "نفق VPN مشفر: 10.66.66.2 / fd66:6666::2"
-        } else {
-            "حالة محرك VPN: في وضع الاستعداد"
+        dnsStatusTitleTv?.text = when {
+            !dnsMode && ts.state == VpnState.CONNECTED -> "DNS عبر النفق: ${if (TunnelManager.adBlockDns) "AdGuard DNS (حجب إعلانات)" else "Cloudflare 1.1.1.1"}"
+            dnsMode && st.running -> "درع DNS المحلي يعمل (بدون خادم VPN)"
+            else -> "غير نشط"
         }
-        val up = if (st.upstreamServers.isNotEmpty()) st.upstreamServers.joinToString(" , ") else "1.1.1.1 , 8.8.8.8"
-        dnsStatusDetailTv?.text = "خوادم النفق: $up | وضع النفق: ${st.splitMode.titleAr} | زمن الاستجابة: ${st.lastLatencyMs} ms"
+        val up = if (st.upstreamServers.isNotEmpty()) st.upstreamServers.joinToString(" , ") else "—"
+        dnsStatusDetailTv?.text = "تقسيم النفق: ${st.splitMode.titleAr}" + if (dnsMode) " | خوادم DNS المحلية: $up | آخر زمن DNS: ${st.lastLatencyMs} ms" else ""
+    }
+
+    private fun fmtBytes(b: Long): String = when {
+        b >= 1L shl 30 -> "%.2f GB".format(b / (1L shl 30).toDouble())
+        b >= 1L shl 20 -> "%.1f MB".format(b / (1L shl 20).toDouble())
+        b >= 1L shl 10 -> "%.0f KB".format(b / 1024.0)
+        else -> "$b B"
     }
 
     private fun renderVideoIncidents(incidents: List<VideoIncident>) {
@@ -972,16 +1018,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleVpnProtection() {
-        if (repo.vpnRunning.value) {
-            val stop = Intent(this, SmartAdShieldVpnService::class.java).setAction(SmartAdShieldVpnService.ACTION_STOP)
-            startService(stop)
-        } else {
-            val prep = VpnService.prepare(this)
-            if (prep != null) {
-                vpnPermissionLauncher.launch(prep)
+        val proto = repo.activeProtocol.value
+        if (proto == VpnProtocol.LOCAL_DNS_SHIELD) {
+            if (TunnelManager.isActive()) TunnelManager.disconnect()
+            if (repo.vpnRunning.value) {
+                startService(Intent(this, SmartAdShieldVpnService::class.java).setAction(SmartAdShieldVpnService.ACTION_STOP))
             } else {
-                startVpnServiceInternal()
+                withVpnPermission { startVpnServiceInternal() }
             }
+            return
+        }
+        if (repo.vpnRunning.value) {
+            startService(Intent(this, SmartAdShieldVpnService::class.java).setAction(SmartAdShieldVpnService.ACTION_STOP))
+        }
+        if (TunnelManager.isActive()) {
+            TunnelManager.disconnect()
+        } else {
+            if (TunnelManager.servers.list().isEmpty()) {
+                showAddEnrollmentDialog()
+                return
+            }
+            withVpnPermission { TunnelManager.connect(proto) }
+        }
+    }
+
+    private fun withVpnPermission(action: () -> Unit) {
+        val prep = VpnService.prepare(this)
+        if (prep != null) {
+            pendingAfterPermission = action
+            vpnPermissionLauncher.launch(prep)
+        } else {
+            action()
         }
     }
 
@@ -1409,21 +1476,62 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showServerSelectionDialog() {
-        val profiles = repo.listWireGuardProfiles()
-        val names = profiles.map { "${it.flagEmoji} ${it.name} (${it.endpointHost}:${it.endpointPort})" }.toTypedArray()
-        val currentIdx = profiles.indexOfFirst { it.id == repo.activeWireGuardProfileId }.coerceAtLeast(0)
-
-        AlertDialog.Builder(this)
-            .setTitle("اختر خادم الـ VPN")
-            .setSingleChoiceItems(names, currentIdx) { dialog, which ->
-                val selected = profiles[which]
-                repo.activeWireGuardProfileId = selected.id
-                Toast.makeText(this, "تم اختيار الخادم: ${selected.name}", Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
+        val list = TunnelManager.servers.list()
+        val activeId = TunnelManager.servers.activeId
+        val names = list.map { e ->
+            val where = e.provisioned?.publicIp ?: e.enrollment?.serverIp ?: "ملف WireGuard"
+            val cc = e.lastVerifiedCountry?.let { " • دولة الخروج المقاسة: $it" } ?: " • لم يُتحقق بعد"
+            val proto = if (e.supportsXray) "WireGuard + Xray" else "WireGuard"
+            "${e.name} ($where) — $proto$cc"
+        }.toTypedArray()
+        val b = AlertDialog.Builder(this).setTitle(if (list.isEmpty()) "لا توجد خوادم بعد" else "اختر الخادم")
+        if (list.isEmpty()) {
+            b.setMessage("أضف خادمك الحقيقي عبر رمز التسجيل SHIELD1 (من مخرجات Oracle) أو استورد ملف WireGuard.")
+        } else {
+            b.setSingleChoiceItems(names, list.indexOfFirst { it.id == activeId }.coerceAtLeast(0)) { d, which ->
+                TunnelManager.servers.activeId = list[which].id
+                d.dismiss()
                 switchTab(0)
             }
-            .setPositiveButton("استيراد ملف .conf مخصص") { _, _ ->
-                showImportWireGuardDialog()
+        }
+        b.setPositiveButton("إضافة رمز تسجيل") { _, _ -> showAddEnrollmentDialog() }
+            .setNeutralButton("استيراد .conf") { _, _ -> showImportWireGuardDialog() }
+            .setNegativeButton(if (list.isEmpty()) "إغلاق" else "حذف المحدد") { _, _ ->
+                val cur = TunnelManager.servers.active() ?: return@setNegativeButton
+                if (list.isNotEmpty()) {
+                    AlertDialog.Builder(this).setMessage("حذف ${cur.name} من الجهاز؟")
+                        .setPositiveButton("حذف") { _, _ -> TunnelManager.servers.remove(cur.id); switchTab(0) }
+                        .setNegativeButton("إلغاء", null).show()
+                }
+            }
+            .show()
+    }
+
+    private fun showAddEnrollmentDialog() {
+        val et = EditText(this).apply {
+            hint = "SHIELD1:..."
+            minLines = 3
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val clip = (getSystemService(CLIPBOARD_SERVICE) as? android.content.ClipboardManager)
+            ?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
+        if (clip != null && clip.trim().startsWith(EnrollmentCode.PREFIX)) et.setText(clip.trim())
+        AlertDialog.Builder(this)
+            .setTitle("إضافة خادم برمز التسجيل")
+            .setMessage("الصق قيمة enrollment_code من صفحة Outputs في Oracle Cloud. تُحفظ مشفّرة على الهاتف، ويُولَّد مفتاح WireGuard الخاص على الهاتف فقط.")
+            .setView(et)
+            .setPositiveButton("تسجيل") { _, _ ->
+                val code = et.text.toString()
+                Toast.makeText(this, "جاري التسجيل لدى الخادم...", Toast.LENGTH_SHORT).show()
+                uiScope.launch {
+                    val r = withContext(Dispatchers.IO) { TunnelManager.enroll(code) }
+                    r.fold(
+                        onSuccess = { Toast.makeText(this@MainActivity, "تم تسجيل الجهاز لدى ${it.name} ✓", Toast.LENGTH_LONG).show() },
+                        onFailure = { Toast.makeText(this@MainActivity, "فشل التسجيل: ${it.message}", Toast.LENGTH_LONG).show() },
+                    )
+                    switchTab(0)
+                }
             }
             .setNegativeButton("إلغاء", null)
             .show()
@@ -1435,34 +1543,31 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(12), dp(20), dp(8))
         }
         val nameEt = EditText(this).apply {
-            hint = "اسم السيرفر (مثال: خادم ألمانيا الخاص)"
+            hint = "اسم الخادم"
             setSingleLine(true)
         }
         val confEt = EditText(this).apply {
-            hint = "الصق محتوى ملف wg0.conf هنا:\n[Interface]\nPrivateKey = ...\nAddress = 10.66.66.2/32\n\n[Peer]\nPublicKey = ...\nEndpoint = 1.2.3.4:51820"
+            hint = "[Interface]\nPrivateKey = ...\nAddress = ...\n\n[Peer]\nPublicKey = ...\nEndpoint = ...\nAllowedIPs = 0.0.0.0/0"
             minLines = 6
             gravity = Gravity.TOP or Gravity.START
         }
         layout.addView(nameEt)
         layout.addView(confEt)
-
         AlertDialog.Builder(this)
-            .setTitle("استيراد تكوين WireGuard مخصص")
+            .setTitle("استيراد ملف WireGuard (اختياري)")
             .setView(layout)
-            .setPositiveButton("استيراد وحفظ") { _, _ ->
+            .setPositiveButton("استيراد") { _, _ ->
                 val text = confEt.text.toString().trim()
-                val name = nameEt.text.toString().trim().ifEmpty { "سيرفر مخصص" }
-                val res = WireGuardConfigManager.parseConf(text, name)
-                res.fold(
-                    onSuccess = { profile ->
-                        repo.addWireGuardProfile(profile)
-                        repo.activeWireGuardProfileId = profile.id
-                        Toast.makeText(this, "تم استيراد ${profile.name} بنجاح ✓", Toast.LENGTH_SHORT).show()
+                val ok = runCatching {
+                    com.wireguard.config.Config.parse(java.io.BufferedReader(java.io.StringReader(text)))
+                }
+                ok.fold(
+                    onSuccess = {
+                        TunnelManager.servers.addManual(nameEt.text.toString().trim().ifEmpty { "WireGuard مستورد" }, text)
+                        Toast.makeText(this, "تم الاستيراد ✓", Toast.LENGTH_SHORT).show()
                         switchTab(0)
                     },
-                    onFailure = { err ->
-                        Toast.makeText(this, "خطأ في قراءة التكوين: ${err.message}", Toast.LENGTH_LONG).show()
-                    }
+                    onFailure = { Toast.makeText(this, "ملف غير صالح: ${it.message}", Toast.LENGTH_LONG).show() },
                 )
             }
             .setNegativeButton("إلغاء", null)
@@ -1633,6 +1738,33 @@ class MainActivity : AppCompatActivity() {
             executeDiagnosticsSuite()
         })
         col.addView(topCard)
+
+        val vpnCard = cardLayout().apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            }
+        }
+        vpnCard.addView(sectionTitle("تشخيص اتصال VPN الحقيقي"))
+        val speedTv = TextView(this).apply {
+            text = "اختبار السرعة يقيس تنزيل 10MB من Cloudflare: بدون VPN أو عبر النفق الحالي."
+            setTextColor(COLOR_TEXT_SECONDARY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        }
+        vpnCard.addView(speedTv)
+        vpnCard.addView(actionButton("قياس السرعة الآن (بيانات حقيقية)") {
+            speedTv.text = "جاري القياس..."
+            uiScope.launch { speedTv.text = withContext(Dispatchers.IO) { TunnelManager.speedTest() } }
+        })
+        tunnelLogTv = TextView(this).apply {
+            text = TunnelManager.status.value.log.reversed().joinToString("\n").ifEmpty { "لا توجد أحداث بعد." }
+            setTextColor(COLOR_TEXT_PRIMARY)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(8), 0, 0)
+            setTextIsSelectable(true)
+        }
+        vpnCard.addView(tunnelLogTv)
+        col.addView(vpnCard)
 
         diagContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL

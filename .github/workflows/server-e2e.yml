@@ -1,0 +1,143 @@
+name: Server E2E
+
+# Installs the real gateway (server/install.sh) on a GitHub runner and proves,
+# from an isolated client network namespace that has NO route to the internet
+# except through the VPN, that WireGuard and Xray VLESS-REALITY actually carry
+# traffic (handshake, exit IP, DNS, TCP and UDP, throughput).
+
+on:
+  push:
+    branches: [main]
+    paths: ['server/**', '.github/workflows/server-e2e.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install gateway
+        run: |
+          TOKEN_LOCAL=$(openssl rand -hex 24)
+          echo "$TOKEN_LOCAL" > /tmp/token
+          sudo SHIELD_TOKEN="$TOKEN_LOCAL" SHIELD_PUBLIC_IP=10.200.0.1 SHIELD_NAME="CI runner" \
+               bash server/install.sh 2>&1 | tee /tmp/install.log
+          sudo cat /etc/shieldvpn/server.json | jq 'del(.xray.short_id)'
+          echo "RUNNER_IP=$(curl -4 -fsS https://1.1.1.1/cdn-cgi/trace | sed -n 's/^ip=//p')" >> "$GITHUB_ENV"
+
+      - name: Client namespace (no internet except via VPN)
+        run: |
+          sudo ip netns add c
+          sudo ip link add veth-h type veth peer name veth-c
+          sudo ip link set veth-c netns c
+          sudo ip addr add 10.200.0.1/24 dev veth-h
+          sudo ip link set veth-h up
+          sudo ip netns exec c ip addr add 10.200.0.2/24 dev veth-c
+          sudo ip netns exec c ip link set veth-c up
+          sudo ip netns exec c ip link set lo up
+          sudo iptables -I INPUT 1 -i veth-h -j ACCEPT
+          echo "--- proof the namespace has no direct internet:"
+          if sudo ip netns exec c curl -m 5 -fsS https://1.1.1.1/cdn-cgi/trace; then echo "LEAK: namespace has internet"; exit 1; fi
+          echo "OK: no direct route"
+
+      - name: Provisioning API (auth, pin, register)
+        run: |
+          PIN=$(sudo openssl x509 -in /etc/shieldvpn/api.crt -outform DER | sha256sum | cut -d' ' -f1)
+          echo "cert pin (sha256 DER): $PIN"
+          sudo cp /etc/shieldvpn/api.crt /tmp/api.crt; sudo chmod 644 /tmp/api.crt
+          API="https://shieldvpn:8443"; R="--resolve shieldvpn:8443:10.200.0.1 --cacert /tmp/api.crt"
+          sudo ip netns exec c curl -fsS $R $API/v1/health | jq .
+          code=$(sudo ip netns exec c curl -s -o /dev/null -w '%{http_code}' $R -H "Authorization: Bearer wrong" -d '{"wg_public_key":"x"}' $API/v1/register)
+          echo "wrong token -> $code"; test "$code" = 401
+          wg genkey | tee /tmp/c.key | wg pubkey > /tmp/c.pub
+          sudo ip netns exec c curl -fsS $R -H "Authorization: Bearer $(cat /tmp/token)" \
+              -d "{\"wg_public_key\":\"$(cat /tmp/c.pub)\",\"device\":\"ci\"}" $API/v1/register > /tmp/reg.json
+          jq 'del(.xray.uuid,.xray.short_id)' /tmp/reg.json
+
+      - name: WireGuard tunnel test
+        run: |
+          SRV=$(jq -r .wg.server_public_key /tmp/reg.json); ADDR=$(jq -r .wg.address4 /tmp/reg.json)
+          sudo ip netns exec c ip link add wg0 type wireguard
+          sudo ip netns exec c wg set wg0 private-key /tmp/c.key peer "$SRV" endpoint 10.200.0.1:51820 allowed-ips 0.0.0.0/0 persistent-keepalive 25
+          sudo ip netns exec c ip addr add "$ADDR" dev wg0
+          sudo ip netns exec c ip link set mtu 1280 up dev wg0
+          sudo ip netns exec c ip route add default dev wg0
+          T=$(sudo ip netns exec c curl -fsS -m 15 https://1.1.1.1/cdn-cgi/trace)
+          EXIT=$(echo "$T" | sed -n 's/^ip=//p'); echo "exit ip via WireGuard: $EXIT (runner: $RUNNER_IP)"
+          test "$EXIT" = "$RUNNER_IP"
+          HS=$(sudo wg show wg0 latest-handshakes | awk '{print $2}'); echo "server latest handshake: $HS"; test "$HS" -gt 0
+          echo "--- DNS through tunnel (AdGuard DNS + Cloudflare):"
+          sudo ip netns exec c dig +short +time=5 @94.140.14.14 www.tiktok.com | head -3
+          sudo ip netns exec c dig +short +time=5 @1.1.1.1 example.com | head -2
+          echo "--- AdGuard DNS blocks an ad domain (expect 0.0.0.0):"
+          sudo ip netns exec c dig +short +time=5 @94.140.14.14 doubleclick.net | head -1
+          echo "--- throughput through tunnel (25 MB):"
+          sudo ip netns exec c curl -s -o /dev/null -m 60 -w 'download %{speed_download} B/s in %{time_total}s\n' 'https://speed.cloudflare.com/__down?bytes=25000000'
+          sudo wg show wg0 transfer
+          sudo ip netns exec c ip link del wg0
+          echo "WIREGUARD_OK=1" >> "$GITHUB_ENV"
+
+      - name: Xray VLESS-REALITY test (SOCKS + TUN, TCP and UDP)
+        run: |
+          X=$(jq -c .xray /tmp/reg.json)
+          cat > /tmp/xc.json <<EOF
+          {"log":{"loglevel":"warning"},
+           "inbounds":[
+             {"tag":"socks","listen":"127.0.0.1","port":10808,"protocol":"socks","settings":{"udp":true}},
+             {"tag":"tun","protocol":"tun","settings":{"name":"xray0","mtu":1500,"gateway":["10.89.0.1/30"]}}
+           ],
+           "outbounds":[{"tag":"proxy","protocol":"vless",
+             "settings":{"vnext":[{"address":"10.200.0.1","port":$(echo $X|jq .port),
+               "users":[{"id":$(echo $X|jq .uuid),"encryption":"none","flow":$(echo $X|jq .flow)}]}]},
+             "streamSettings":{"network":"tcp","security":"reality","realitySettings":{
+               "serverName":$(echo $X|jq .sni),"fingerprint":"chrome","publicKey":$(echo $X|jq .public_key),
+               "shortId":$(echo $X|jq .short_id),"spiderX":"/"}}}]}
+          EOF
+          sudo ip netns exec c /usr/local/bin/xray run -c /tmp/xc.json > /tmp/xray-client.log 2>&1 &
+          sleep 4
+          T=$(sudo ip netns exec c curl -fsS -m 15 --socks5 127.0.0.1:10808 https://1.1.1.1/cdn-cgi/trace)
+          EXIT=$(echo "$T" | sed -n 's/^ip=//p'); echo "exit ip via Xray SOCKS: $EXIT"; test "$EXIT" = "$RUNNER_IP"
+          echo "--- TUN mode (same inbound type the Android app uses):"
+          sudo ip netns exec c ip route add default dev xray0
+          T=$(sudo ip netns exec c curl -fsS -m 15 https://1.0.0.1/cdn-cgi/trace)
+          EXIT=$(echo "$T" | sed -n 's/^ip=//p'); echo "exit ip via Xray TUN: $EXIT"; test "$EXIT" = "$RUNNER_IP"
+          echo "--- UDP (DNS) through Xray TUN:"
+          sudo ip netns exec c dig +short +time=5 @94.140.14.14 www.tiktok.com | head -3
+          test -n "$(sudo ip netns exec c dig +short +time=5 @1.1.1.1 example.com)"
+          echo "--- throughput through Xray (25 MB):"
+          sudo ip netns exec c curl -s -o /dev/null -m 90 -w 'download %{speed_download} B/s in %{time_total}s\n' 'https://speed.cloudflare.com/__down?bytes=25000000'
+          echo "XRAY_OK=1" >> "$GITHUB_ENV"
+
+      - name: Oracle stack validates
+        run: |
+          curl -fsSL https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip -o /tmp/tf.zip
+          unzip -q /tmp/tf.zip -d /tmp/tf
+          mkdir -p /tmp/stack && cp server/oracle/* server/install.sh server/provision.py /tmp/stack/
+          cd /tmp/stack && /tmp/tf/terraform init -backend=false -input=false >/dev/null && /tmp/tf/terraform validate
+          cd /tmp/stack && zip -q -r "$GITHUB_WORKSPACE/oracle-stack.zip" .
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          sudo journalctl -u shieldvpn-api -u xray -u wg-quick@wg0 --no-pager | tail -80 || true
+          cat /tmp/xray-client.log || true
+          sudo wg show || true
+          sudo iptables -S | head -40 || true
+
+      - name: Publish Oracle stack
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: oracle-stack
+          name: "Oracle Cloud gateway stack (E2E-tested)"
+          make_latest: false
+          body: |
+            Terraform stack for Oracle Resource Manager. Contains no secrets: the enrollment token,
+            WireGuard keys and TLS key are generated inside your Oracle account.
+            Last E2E run: WireGuard=${{ env.WIREGUARD_OK }} Xray=${{ env.XRAY_OK }} (commit ${{ github.sha }}).
+          files: oracle-stack.zip

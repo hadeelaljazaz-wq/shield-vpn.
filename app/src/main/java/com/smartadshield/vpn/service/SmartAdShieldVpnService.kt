@@ -23,9 +23,7 @@ import com.smartadshield.vpn.core.DnsPacketProcessor
 import com.smartadshield.vpn.core.dns.SocketProtector
 import com.smartadshield.vpn.core.dns.UpstreamResolver
 import com.smartadshield.vpn.core.engine.SplitTunnelingMode
-import com.smartadshield.vpn.core.engine.VpnEngineManager
 import com.smartadshield.vpn.core.engine.VpnError
-import com.smartadshield.vpn.core.engine.VpnProtocol
 import com.smartadshield.vpn.core.engine.VpnState
 import com.smartadshield.vpn.core.net.ParsedPacket
 import com.smartadshield.vpn.data.AppRepository
@@ -38,15 +36,13 @@ import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Production-grade Multi-Protocol Android VPN Service.
+ * LOCAL DNS SHIELD ONLY.
  *
- * Supports:
- * - 100% Full Encrypted Tunneling (0.0.0.0/0, ::/0) through Remote VPN Gateway.
- * - Split Tunneling (All Apps, Selected Apps only, or Excluded Apps).
- * - Real WireGuard Noise_IKpsk2 Transport & Xray / Anti-Censorship bypass.
- * - In-Tunnel DNS Ad Filtering (Smart Ad Shield) without breaking YouTube/TikTok streaming.
- * - Socket protection via VpnService.protect() and binding to active physical network.
- * - Strict 10-state connection machine with actual external connectivity verification.
+ * Routes nothing but DNS to a virtual resolver inside the TUN and filters ads
+ * on-device. It does NOT connect to any VPN server: the public IP does not
+ * change and traffic is not encrypted by this service. State is reported as
+ * [VpnState.LOCAL_DNS_ONLY]. Real VPN tunnels are handled by
+ * com.smartadshield.vpn.tunnel (WireGuard GoBackend / Xray).
  */
 class SmartAdShieldVpnService : VpnService() {
 
@@ -54,7 +50,6 @@ class SmartAdShieldVpnService : VpnService() {
     private var tunPfd: ParcelFileDescriptor? = null
     private var readerThread: Thread? = null
     private var processor: DnsPacketProcessor? = null
-    private var engineManager: VpnEngineManager? = null
     private var socketProtector: SocketProtector? = null
     private var upstreamResolver: UpstreamResolver? = null
     private val running = AtomicBoolean(false)
@@ -155,55 +150,34 @@ class SmartAdShieldVpnService : VpnService() {
     private fun establishAndStartLoop() {
         val resolver = upstreamResolver ?: return
         val protector = socketProtector ?: SocketProtector.None
-        val profile = repo.activeWireGuardProfile()
-        val protocol = repo.activeProtocol.value
         val splitMode = repo.splitTunnelingMode.value
 
+        // DNS-only: the only routes are the virtual resolver addresses, so all
+        // other traffic keeps using the physical network directly (no slowdown,
+        // no blackhole). Android sends DNS to the VPN's DNS servers.
         val builder = Builder()
-            .setSession("Ultimate VPN Secure Tunnel")
-            .setMtu(1420)
-            .addAddress("10.66.66.2", 24)
-            .addDnsServer("1.1.1.1")
-            .addDnsServer("8.8.8.8")
-            .addAddress("fd66:6666::2", 64)
-            .allowFamily(OsConstants.AF_INET)
-            .allowFamily(OsConstants.AF_INET6)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            builder.setMetered(false)
-        }
-
-        // Apply Routing: Full VPN vs DNS Only
-        if (protocol == VpnProtocol.LOCAL_DNS_SHIELD) {
-            builder.addAddress(VIRTUAL_CLIENT_IPV4, 30)
-            builder.addDnsServer(VIRTUAL_DNS_IPV4)
-            builder.addRoute(VIRTUAL_DNS_IPV4, 32)
+            .setSession("Smart Ad Shield (DNS)")
+            .setMtu(1500)
+            .addAddress(VIRTUAL_CLIENT_IPV4, 30)
+            .addDnsServer(VIRTUAL_DNS_IPV4)
+            .addRoute(VIRTUAL_DNS_IPV4, 32)
+            .setBlocking(true)
+        runCatching {
+            builder.addAddress(VIRTUAL_CLIENT_IPV6, 64)
+            builder.addDnsServer(VIRTUAL_DNS_IPV6)
             builder.addRoute(VIRTUAL_DNS_IPV6, 128)
-        } else {
-            // Real Full VPN Tunneling (0.0.0.0/0 & ::/0)
-            builder.addRoute("0.0.0.0", 0)
-            runCatching { builder.addRoute("::", 0) }
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
+        // Our own process must reach upstream resolvers directly.
+        runCatching { builder.addDisallowedApplication(packageName) }
 
-        // Apply Split Tunneling safely (Never mix allowed and disallowed on same builder)
         when (splitMode) {
-            SplitTunnelingMode.SELECTED_APPS -> {
-                val selected = repo.selectedPackages()
-                if (selected.isNotEmpty()) {
-                    for (pkg in selected) {
-                        runCatching { builder.addAllowedApplication(pkg) }
-                    }
-                }
-            }
             SplitTunnelingMode.EXCLUDED_APPS -> {
-                val excluded = repo.excludedPackages()
-                for (pkg in excluded) {
-                    runCatching { builder.addDisallowedApplication(pkg) }
-                }
+                for (pkg in repo.excludedPackages()) runCatching { builder.addDisallowedApplication(pkg) }
             }
-            SplitTunnelingMode.ALL_APPS -> {
-                // All device apps tunneled
-            }
+            // SELECTED_APPS cannot be combined with disallowing ourselves; DNS
+            // filtering applies device-wide in that case.
+            else -> Unit
         }
 
         val pfd = try {
@@ -224,8 +198,6 @@ class SmartAdShieldVpnService : VpnService() {
         val vdnsSet = setOf(
             InetAddress.getByName(VIRTUAL_DNS_IPV4),
             InetAddress.getByName(VIRTUAL_DNS_IPV6),
-            InetAddress.getByName("1.1.1.1"),
-            InetAddress.getByName("8.8.8.8"),
         )
 
         val proc = DnsPacketProcessor(
@@ -247,22 +219,8 @@ class SmartAdShieldVpnService : VpnService() {
         )
         processor = proc
 
-        val manager = VpnEngineManager(
-            socketProtector = protector,
-            tunWriter = { decryptedPacket ->
-                synchronized(writeLock) {
-                    runCatching { outStream.write(decryptedPacket) }
-                }
-            },
-            onStateChanged = { state, error ->
-                repo.onVpnStateChanged(state, error)
-                updateNotification()
-            }
-        )
-        manager.dnsProcessor = proc
-        engineManager = manager
-
-        manager.start(profile, protocol)
+        repo.onVpnStateChanged(VpnState.LOCAL_DNS_ONLY, VpnError.NONE)
+        updateNotification()
 
         val inStream = FileInputStream(pfd.fileDescriptor)
         val thread = Thread({
@@ -275,7 +233,7 @@ class SmartAdShieldVpnService : VpnService() {
                 }
                 if (n < 0) break
                 if (n > 0) {
-                    manager.handleTunPacket(buf, n)
+                    proc.handlePacket(buf, n)
                 }
             }
         }, "vpn-tun-reader").apply {
@@ -310,8 +268,6 @@ class SmartAdShieldVpnService : VpnService() {
     private fun stopReaderAndCloseDescriptor() {
         readerThread?.interrupt()
         readerThread = null
-        engineManager?.stop()
-        engineManager = null
         processor?.shutdown()
         processor = null
         runCatching { tunPfd?.close() }
@@ -376,13 +332,11 @@ class SmartAdShieldVpnService : VpnService() {
                 activePhysicalNetwork = network
                 setUnderlyingNetworks(arrayOf(network))
                 updatePhysicalNetworkAndServers()
-                engineManager?.onNetworkChanged(network)
             }
 
             override fun onLost(network: Network) {
                 if (activePhysicalNetwork == network) {
                     activePhysicalNetwork = null
-                    engineManager?.onNetworkLost()
                 }
             }
 
@@ -408,10 +362,10 @@ class SmartAdShieldVpnService : VpnService() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             val ch = NotificationChannel(
                 CHANNEL_ID,
-                "خدمة Ultimate VPN المشفرة",
+                "درع DNS المحلي",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "إشعار تشغيل نفق الـ VPN المشفر وحماية الاتصال"
+                description = "حجب الإعلانات عبر DNS على الجهاز (ليس VPN)"
                 setShowBadge(false)
             }
             nm.createNotificationChannel(ch)
@@ -433,9 +387,8 @@ class SmartAdShieldVpnService : VpnService() {
         )
         val st = repo.stats.value
         val state = repo.vpnState.value
-        val server = repo.activeWireGuardProfile().name
-        val title = "Ultimate VPN: ${state.labelAr}"
-        val text = "السيرفر: $server | محجوب: ${st.blockedQueries} | القواعد: ${st.totalActiveRules}"
+        val title = "Smart Ad Shield: ${state.labelAr}"
+        val text = "حجب DNS محلي — عنوان IP لم يتغير | محجوب: ${st.blockedQueries}"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_shield)
@@ -443,7 +396,7 @@ class SmartAdShieldVpnService : VpnService() {
             .setContentText(text)
             .setContentIntent(openIntent)
             .setOngoing(true)
-            .addAction(0, "قطع الاتصال", stopIntent)
+            .addAction(0, "إيقاف", stopIntent)
             .build()
     }
 

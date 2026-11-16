@@ -1,0 +1,51 @@
+title: "Smart Ad Shield VPN gateway (Always Free)"
+description: "Creates one Always Free Ubuntu VM running WireGuard, Xray VLESS-REALITY and the app's provisioning API."
+schemaVersion: 1.1.0
+version: "20261117"
+locale: "en"
+variableGroups:
+  - title: "Server"
+    variables: [instance_shape, ocpus, memory_gb, availability_domain_number, server_name]
+  - title: "Advanced"
+    visible: false
+    variables: [tenancy_ocid, region, compartment_ocid, country_code, wg_port, ssh_public_key]
+variables:
+  instance_shape:
+    type: enum
+    enum: ["VM.Standard.A1.Flex", "VM.Standard.E2.1.Micro"]
+    default: "VM.Standard.A1.Flex"
+    title: "Shape (switch to E2.1.Micro if you get 'Out of capacity')"
+    required: true
+  ocpus:
+    type: integer
+    minimum: 1
+    maximum: 2
+    default: 1
+    title: "OCPUs (Arm only)"
+  memory_gb:
+    type: integer
+    minimum: 1
+    maximum: 12
+    default: 6
+    title: "Memory GB (Arm only)"
+  availability_domain_number:
+    type: integer
+    minimum: 1
+    maximum: 3
+    default: 1
+    title: "Availability domain (try 2 or 3 on capacity errors)"
+  server_name:
+    type: string
+    default: "Oracle Cloud"
+    title: "Name shown in the app"
+outputs:
+  enrollment_code:
+    type: copyableString
+    title: "Enrollment code — paste into the app"
+    visible: true
+  server_ip:
+    type: string
+    title: "Server public IP"
+outputGroups:
+  - title: "Connect your phone"
+    outputs: [enrollment_code, server_ip]

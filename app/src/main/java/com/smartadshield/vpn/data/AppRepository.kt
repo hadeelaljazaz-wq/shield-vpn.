@@ -27,9 +27,6 @@ import com.smartadshield.vpn.core.engine.VpnProtocol
 import com.smartadshield.vpn.core.engine.VpnState
 import com.smartadshield.vpn.core.video.VideoCompatibilityMonitor
 import com.smartadshield.vpn.core.video.VideoIncident
-import com.smartadshield.vpn.core.wireguard.TunnelStats
-import com.smartadshield.vpn.core.wireguard.WireGuardConfigManager
-import com.smartadshield.vpn.core.wireguard.WireGuardProfile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -83,7 +80,7 @@ data class VpnStats(
     val totalActiveRules: Int = 0,
     val cacheSize: Int = 0,
     val lastLatencyMs: Long = 0L,
-    val wireGuardServerName: String = "ألمانيا - فرانكفورت",
+    val wireGuardServerName: String = "",
     val wireGuardStatus: String = "غير متصل",
     val tunneledAppsCount: Int = 3,
     val vpnState: VpnState = VpnState.DISCONNECTED,
@@ -153,8 +150,8 @@ class AppRepository private constructor(private val context: Context) {
     private val _videoIncidents = MutableStateFlow<List<VideoIncident>>(emptyList())
     val videoIncidents: StateFlow<List<VideoIncident>> = _videoIncidents.asStateFlow()
 
-    private val _wireGuardStats = MutableStateFlow<TunnelStats?>(null)
-    val wireGuardStats: StateFlow<TunnelStats?> = _wireGuardStats.asStateFlow()
+    /** Name of the currently selected real server (supplied by the tunnel layer). */
+    @Volatile var serverNameProvider: () -> String = { "" }
 
     private val _subscriptions = MutableStateFlow<List<FilterSubscription>>(emptyList())
     val subscriptions: StateFlow<List<FilterSubscription>> = _subscriptions.asStateFlow()
@@ -333,44 +330,6 @@ class AppRepository private constructor(private val context: Context) {
             vpnConfigChangeListener?.invoke()
         }
 
-    fun listWireGuardProfiles(): List<WireGuardProfile> {
-        val raw = prefs.getString("wg_profiles_json", null)
-        return WireGuardConfigManager.deserializeProfiles(raw)
-    }
-
-    fun saveWireGuardProfiles(profiles: List<WireGuardProfile>) {
-        val json = WireGuardConfigManager.serializeProfiles(profiles)
-        prefs.edit().putString("wg_profiles_json", json).apply()
-    }
-
-    var activeWireGuardProfileId: String
-        get() = prefs.getString("active_wg_profile_id", null) ?: listWireGuardProfiles().firstOrNull()?.id ?: "preset_frankfurt"
-        set(v) {
-            prefs.edit().putString("active_wg_profile_id", v).apply()
-            vpnConfigChangeListener?.invoke()
-        }
-
-    fun activeWireGuardProfile(): WireGuardProfile {
-        val all = listWireGuardProfiles()
-        return all.find { it.id == activeWireGuardProfileId } ?: all.firstOrNull() ?: WireGuardConfigManager.PRESET_PROFILES.first()
-    }
-
-    fun addWireGuardProfile(profile: WireGuardProfile) {
-        val current = listWireGuardProfiles().filterNot { it.id == profile.id }
-        saveWireGuardProfiles(current + profile)
-    }
-
-    fun removeWireGuardProfile(id: String): Boolean {
-        val current = listWireGuardProfiles()
-        if (current.size <= 1) return false
-        val next = current.filterNot { it.id == id }
-        saveWireGuardProfiles(next)
-        if (activeWireGuardProfileId == id) {
-            activeWireGuardProfileId = next.first().id
-        }
-        return true
-    }
-
     val defaultTunneledPackages: Set<String>
         get() = DEFAULT_TUNNELED_PACKAGES
 
@@ -387,11 +346,6 @@ class AppRepository private constructor(private val context: Context) {
     }
 
     fun isAppTunneled(packageName: String): Boolean = packageName in tunneledPackages()
-
-    fun updateWireGuardStats(st: TunnelStats) {
-        _wireGuardStats.value = st
-        publishStats()
-    }
 
     // ------------------------------------------------------------------ bundled & remote lists
 
@@ -836,7 +790,6 @@ class AppRepository private constructor(private val context: Context) {
     }
 
     fun publishStats() {
-        val server = activeWireGuardProfile()
         val currentSelected = selectedPackages()
         _stats.value = VpnStats(
             running = _vpnRunning.value,
@@ -852,7 +805,7 @@ class AppRepository private constructor(private val context: Context) {
             totalActiveRules = engine.totalRules,
             cacheSize = dnsCache.size(),
             lastLatencyMs = lastLatency,
-            wireGuardServerName = server.name,
+            wireGuardServerName = serverNameProvider(),
             wireGuardStatus = _vpnState.value.labelAr,
             tunneledAppsCount = currentSelected.size,
             vpnState = _vpnState.value,

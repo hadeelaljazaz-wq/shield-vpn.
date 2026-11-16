@@ -3,7 +3,7 @@ name: Android build
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**']
+    paths-ignore: ['**.md', 'docs/**', 'server/**', '.github/workflows/server-e2e.yml']
   workflow_dispatch:
 
 permissions:
@@ -13,10 +13,13 @@ concurrency:
   group: android-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  XRAY_VERSION: v26.11.9
+
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -27,29 +30,67 @@ jobs:
 
       - uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-36 build-tools;36.0.0 platform-tools'
+          packages: 'platforms;android-36 build-tools;36.0.0 platform-tools ndk;28.2.13676358'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: xray/libxray/go.mod
+
+      # ---- Xray-core for Android (gomobile .aar, built from source) ----
+      - name: Cache libxray.aar
+        id: aar
+        uses: actions/cache@v4
+        with:
+          path: app/libs/libxray.aar
+          key: libxray-${{ env.XRAY_VERSION }}-${{ hashFiles('xray/libxray/*.go', 'xray/libxray/build.sh') }}
+
+      - name: Build libxray.aar (Xray-core ${{ env.XRAY_VERSION }})
+        if: steps.aar.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+        run: ./xray/libxray/build.sh
+
+      # ---- stable signing key (kept in the Actions cache, never committed) ----
+      - name: Restore signing key
+        id: ks
+        uses: actions/cache@v4
+        with:
+          path: ~/.shield-keystore
+          key: shield-signing-v1
+      - name: Create signing key
+        if: steps.ks.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.shield-keystore
+          keytool -genkeypair -v -keystore ~/.shield-keystore/release.jks -storepass shieldci -keypass shieldci \
+            -alias shield -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Smart Ad Shield VPN"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.14.3'
 
       - name: Unit tests
-        run: gradle :app:testDebugUnitTest --stacktrace --no-daemon
+        run: gradle :app:testReleaseUnitTest --stacktrace --no-daemon
 
-      - name: Assemble APK
-        run: gradle :app:assembleDebug --stacktrace --no-daemon
+      - name: Assemble release APK
+        run: |
+          export SHIELD_KEYSTORE="$HOME/.shield-keystore/release.jks"
+          gradle :app:assembleRelease --stacktrace --no-daemon
 
       - name: Collect APK
+        id: apk
         run: |
           mkdir -p out
-          cp app/build/outputs/apk/debug/*.apk out/SmartAdShieldVPN-${GITHUB_SHA::7}.apk
-          ls -la out
-          sha256sum out/*.apk
+          cp app/build/outputs/apk/release/app-release.apk out/SmartAdShieldVPN.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs out/SmartAdShieldVPN.apk | head -3
+          unzip -l out/SmartAdShieldVPN.apk | grep -E 'libwg-go|libgojni' || (echo "native VPN engines missing from APK" && exit 1)
+          sha256sum out/SmartAdShieldVPN.apk | tee out/SmartAdShieldVPN.apk.sha256
+          echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
           name: SmartAdShieldVPN-apk
-          path: out/*.apk
+          path: out/
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
@@ -58,3 +99,16 @@ jobs:
           name: unit-test-reports
           path: app/build/reports/tests/
           if-no-files-found: ignore
+
+      - name: Publish APK release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: "APK build ${{ github.run_number }} (${{ steps.apk.outputs.short }})"
+          make_latest: true
+          body: |
+            Built by GitHub Actions from ${{ github.sha }}.
+            Status: build + unit tests passed. **NOT DEVICE TESTED.** A successful build does not prove a VPN connection.
+          files: |
+            out/SmartAdShieldVPN.apk
+            out/SmartAdShieldVPN.apk.sha256
